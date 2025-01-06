@@ -37,13 +37,19 @@ async def data_ingestion():
             loader = PyMuPDFLoader(filepath)
             doc_pages = loader.load()
 
+            # Log the number of pages loaded from the PDF
+            st.write(f"Loaded {len(doc_pages)} pages from {filename}")
+
             # Process in chunks
             documents = []
             for i in range(0, len(doc_pages), CHUNK_SIZE):
                 chunk = doc_pages[i:i + CHUNK_SIZE]
                 documents.extend(chunk)
 
-            # Initialize embeddings
+            # Log document chunks
+            st.write(f"Processed {len(documents)} chunks from {filename}")
+
+            # Initialize embeddings and vector store
             embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2")
             vector_store = FAISS.from_documents(documents, embeddings)
             vector_store.save_local(os.path.join(PERSIST_DIR, filename))
@@ -62,8 +68,11 @@ async def generate_structured_pdf():
                 HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2"),
                 allow_dangerous_deserialization=True
             )
-            docs = vector_store.similarity_search("Please extract the full details for each section: Business Profile, Operating Segments, Verizon Consumer Group, Verizon Business Group, Corporate and Other.")  # More detailed query
+            docs = vector_store.similarity_search("Please extract the full details for each section: Business Profile, Operating Segments, Verizon Consumer Group, Verizon Business Group, Corporate and Other.")
             context = "\n".join([doc.page_content for doc in docs])
+
+            # Log the context being passed to the AI model
+            st.write(f"Context for {filename}: {context[:500]}...")  # Display first 500 characters of the context for review
 
             # Template to guide the AI in generating structured data
             prompt_template = PromptTemplate(
@@ -89,6 +98,10 @@ For each section, ensure that you extract and include **all relevant details** u
             )
             chain = LLMChain(llm=llm, prompt=prompt_template)
             response = await chain.arun(context=context)
+
+            # Log the AI response for debugging
+            st.write(f"AI response for {filename}: {response[:500]}...")  # Display first 500 characters of the response for review
+
             responses.append(response)
 
         # Combine all the responses and generate the PDF
@@ -117,7 +130,7 @@ def generate_pdf(data, output_path):
     # Use a default style for the PDF
     styles = getSampleStyleSheet()
     normal_style = styles["Normal"]
-
+    
     # Set max width for text
     max_width = 450  # Maximum width for text
 
@@ -134,12 +147,12 @@ def generate_pdf(data, output_path):
         # Add content to story
         story.append(content_paragraph)
         story.append(Paragraph("<br/>", normal_style))  # Add space between sections
-
+    
     # Build the PDF
     doc.build(story)
 
 st.title("PDF Processing Chatbot")
-st.markdown("Upload PDFs and automatically generate a structured PDF format.")
+st.markdown("Upload PDFs and generate a structured PDF format.")
 
 if 'pdf_data' not in st.session_state:
     st.session_state.pdf_data = {}
@@ -153,5 +166,8 @@ with st.sidebar:
                 with open(filepath, "wb") as f:
                     f.write(uploaded_file.getbuffer())
             asyncio.run(data_ingestion())
-            # Automatically generate the PDF after ingestion
-            asyncio.run(generate_structured_pdf())
+
+# Generate structured PDF based on AI extraction
+if st.button("Generate PDF"):
+    with st.spinner("Processing your query..."):
+        asyncio.run(generate_structured_pdf())
