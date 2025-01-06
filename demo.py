@@ -10,7 +10,8 @@ from langchain.embeddings import HuggingFaceEmbeddings
 from langchain.document_loaders import PyMuPDFLoader
 from langchain_openai import AzureChatOpenAI
 from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
+from reportlab.lib.styles import getSampleStyleSheet
+from reportlab.platypus import SimpleDocTemplate, Paragraph
 
 # Load environment variables
 load_dotenv()
@@ -63,12 +64,36 @@ async def handle_query(query):
             docs = vector_store.similarity_search(query)
             context = "\n".join([doc.page_content for doc in docs])
 
+            # Template to guide the AI in generating structured data
             prompt_template = PromptTemplate(
                 input_variables=["context", "query"],
-                template="""Extract the following structured information from the documents and display in the PDF:
-Business Profile, Operating Segments, Verizon Consumer Group, Verizon Business Group, Corporate and Other.
-Ensure the content is organized and properly formatted.
-{context}"""
+                template="""Given the following context, extract the following structured information and organize it into these sections:
+1. Business Profile
+2. Operating Segments
+3. Verizon Consumer Group
+4. Verizon Business Group
+5. Corporate and Other
+
+Context:
+{context}
+
+Ensure the content is organized under the correct section and formatted properly for a structured document. Your response should follow the format below:
+
+Business Profile:
+<Extracted information for Business Profile>
+
+Operating Segments:
+<Extracted information for Operating Segments>
+
+Verizon Consumer Group:
+<Extracted information for Verizon Consumer Group>
+
+Verizon Business Group:
+<Extracted information for Verizon Business Group>
+
+Corporate and Other:
+<Extracted information for Corporate and Other>
+"""
             )
             llm = AzureChatOpenAI(
                 azure_endpoint=os.getenv("AZURE_OPENAI_ENDPOINT"),
@@ -79,25 +104,34 @@ Ensure the content is organized and properly formatted.
             chain = LLMChain(llm=llm, prompt=prompt_template)
             response = await chain.arun(context=context, query=query)
             responses.append(response)
+        
+        # Join all responses into a single string and return
         return "\n\n".join(responses)
     except Exception as e:
         st.error(f"An error occurred: {e}")
         return ""
 
 def generate_pdf(data, output_path):
-    c = canvas.Canvas(output_path, pagesize=letter)
-    c.drawString(100, 750, "Generated Document")
-    y_position = 730
+    # Create a SimpleDocTemplate to handle PDF generation with proper formatting
+    doc = SimpleDocTemplate(output_path, pagesize=letter)
+    story = []
+
+    # Use a default style for the PDF
+    styles = getSampleStyleSheet()
+    normal_style = styles["Normal"]
+
     for section, content in data.items():
-        c.drawString(100, y_position, f"{section}:")
-        y_position -= 20
-        c.drawString(120, y_position, f"{content} This section includes additional details and key insights about the topic for comprehensive understanding.")
-        y_position -= 40  # Add extra space after each section for readability
-        y_position -= 20
-        if y_position < 50:  # Prevent writing beyond the page
-            c.showPage()
-            y_position = 750
-    c.save()
+        # Add section title as a heading
+        section_paragraph = Paragraph(f"<b>{section}</b>", normal_style)
+        story.append(section_paragraph)
+        
+        # Add content with line breaks
+        content_paragraph = Paragraph(content, normal_style)
+        story.append(content_paragraph)
+        story.append(Paragraph("<br/>", normal_style))  # Add some space between sections
+
+    # Build the PDF
+    doc.build(story)
 
 st.title("PDF Processing Chatbot")
 st.markdown("Upload PDFs and generate a structured PDF format.")
@@ -115,7 +149,22 @@ with st.sidebar:
                     f.write(uploaded_file.getbuffer())
             asyncio.run(data_ingestion())
 
-if 'pdf_data' in st.session_state and st.session_state.pdf_data:
-    generate_pdf({"Business Profile": "Verizon Communications Inc. (“Verizon”) is one of the world’s leading providers of communications, technology, information and entertainment products and services to consumers, businesses and government entities. With a presence around the world, it offers data, video and voice services and solutions on networks and platforms that are designed to meet customers’ demand for mobility, reliable network connectivity and security. The company had a customer base of 144.7 million as of Sep 2024 within the wireless segment, with about 86% being postpaid customers. Average revenue per account (ARPA) from postpaid has been steadily rising and the company accounts for approximately 40% of the market share within the total wireless segment, with its direct competitors (namely, AT&T and T-Mobile) accounting for majority of the rest.", "Operating Segments": "Verizon Consumer Group, Verizon Business Group, Corporate and Other.", "Verizon Consumer Group": "Consumer segment provides consumer-focused wireless and wireline communications services and products. For 9M ended Sep 2024, the Consumer segment revenues were $75.3 billion, representing approximately 76% of Verizon’s consolidated revenues. It also includes fixed wireless access (FWA) broadband through 5G or 4G LTE networks as an alternative to traditional landline internet access. As of Sep 2024, Consumer segment had approximately 114.2 million wireless retail connections. In addition, as of Sep 2024, Consumer segment had approximately 9.7 million total broadband connections (which includes Fios internet, Digital Subscriber Line (DSL) and FWA connections), and approximately 2.8 million Fios video connections.", "Verizon Business Group": "The Business segment provides wireless and wireline communications services and products. These products and services are provided to businesses, government customers and wireless and wireline carriers across the U.S. and a subset of these products and services to customers around the world. The Business segment’s operating revenues for 9M ended Sep 2024, totaled $22.1 billion, a decrease of 3.1%, compared to same period in previous year. The business segment accounted for approximately 22.2% of Verizon’s consolidated revenues for the same period.", "Corporate and Other": "Corporate and other primarily includes device insurance programs, investments in unconsolidated businesses and development stage businesses that support strategic initiatives, as well as unallocated corporate expenses, certain pension and other employee benefit related costs and interest and financing expenses."}, "output.pdf")
-    display_pdf("output.pdf")
-    st.success("Generated PDF is ready!")
+# Add query input to dynamically generate content
+query = st.text_input("Enter your query to extract information")
+if query:
+    with st.spinner("Processing your query..."):
+        result = asyncio.run(handle_query(query))
+        if result:
+            # Parse the AI response into sections (Business Profile, Operating Segments, etc.)
+            sections = {}
+            for section in ["Business Profile", "Operating Segments", "Verizon Consumer Group", "Verizon Business Group", "Corporate and Other"]:
+                start_index = result.find(section)
+                if start_index != -1:
+                    end_index = result.find("\n", start_index + len(section))
+                    content = result[start_index + len(section):end_index].strip() if end_index != -1 else result[start_index + len(section):]
+                    sections[section] = content.strip()
+            
+            # Generate the PDF with AI-generated content
+            generate_pdf(sections, "generated_output.pdf")
+            display_pdf("generated_output.pdf")
+            st.success("Generated PDF is ready!")
