@@ -52,22 +52,23 @@ async def data_ingestion():
     st.session_state.pdf_data = pdf_data
     st.success("Data ingestion completed successfully!")
 
-async def handle_query(query):
+async def generate_structured_pdf():
     try:
         responses = []
+        # Iterate through the PDF data and extract information
         for filename, vector_store in st.session_state.pdf_data.items():
             vector_store = FAISS.load_local(
                 os.path.join(PERSIST_DIR, filename),
                 HuggingFaceEmbeddings(model_name="sentence-transformers/all-mpnet-base-v2"),
                 allow_dangerous_deserialization=True
             )
-            docs = vector_store.similarity_search(query)
+            docs = vector_store.similarity_search("Please extract the full details for each section: Business Profile, Operating Segments, Verizon Consumer Group, Verizon Business Group, Corporate and Other.")  # More detailed query
             context = "\n".join([doc.page_content for doc in docs])
 
             # Template to guide the AI in generating structured data
             prompt_template = PromptTemplate(
-                input_variables=["context", "query"],
-                template="""Given the following context, extract the following structured information and organize it into these sections:
+                input_variables=["context"],
+                template="""Given the following context, extract detailed information under the following sections and organize it clearly:
 1. Business Profile
 2. Operating Segments
 3. Verizon Consumer Group
@@ -77,22 +78,7 @@ async def handle_query(query):
 Context:
 {context}
 
-Ensure the content is organized under the correct section and formatted properly for a structured document. Your response should follow the format below:
-
-Business Profile:
-<Extracted information for Business Profile>
-
-Operating Segments:
-<Extracted information for Operating Segments>
-
-Verizon Consumer Group:
-<Extracted information for Verizon Consumer Group>
-
-Verizon Business Group:
-<Extracted information for Verizon Business Group>
-
-Corporate and Other:
-<Extracted information for Corporate and Other>
+For each section, ensure that you extract and include **all relevant details** under the appropriate heading, such as company overview, financials, and key metrics. Format the information neatly and clearly, with each section clearly labeled and all important details included.
 """
             )
             llm = AzureChatOpenAI(
@@ -102,14 +88,26 @@ Corporate and Other:
                 openai_api_key=os.getenv("OPENAI_API_KEY")
             )
             chain = LLMChain(llm=llm, prompt=prompt_template)
-            response = await chain.arun(context=context, query=query)
+            response = await chain.arun(context=context)
             responses.append(response)
-        
-        # Join all responses into a single string and return
-        return "\n\n".join(responses)
+
+        # Combine all the responses and generate the PDF
+        content = "\n\n".join(responses)
+        sections = {}
+        for section in ["Business Profile", "Operating Segments", "Verizon Consumer Group", "Verizon Business Group", "Corporate and Other"]:
+            start_index = content.find(section)
+            if start_index != -1:
+                end_index = content.find("\n", start_index + len(section))
+                content_section = content[start_index + len(section):end_index].strip() if end_index != -1 else content[start_index + len(section):]
+                sections[section] = content_section.strip()
+
+        # Generate the PDF
+        generate_pdf(sections, "generated_output.pdf")
+        display_pdf("generated_output.pdf")
+        st.success("Generated PDF is ready!")
+
     except Exception as e:
         st.error(f"An error occurred: {e}")
-        return ""
 
 def generate_pdf(data, output_path):
     # Create a SimpleDocTemplate to handle PDF generation with proper formatting
@@ -120,21 +118,28 @@ def generate_pdf(data, output_path):
     styles = getSampleStyleSheet()
     normal_style = styles["Normal"]
 
+    # Set max width for text
+    max_width = 450  # Maximum width for text
+
+    # Iterate through the sections and add them to the PDF
     for section, content in data.items():
         # Add section title as a heading
         section_paragraph = Paragraph(f"<b>{section}</b>", normal_style)
         story.append(section_paragraph)
-        
-        # Add content with line breaks
-        content_paragraph = Paragraph(content, normal_style)
+
+        # Ensure content is wrapped correctly
+        wrapped_content = content.replace("\n", "<br/>")
+        content_paragraph = Paragraph(wrapped_content, normal_style)
+
+        # Add content to story
         story.append(content_paragraph)
-        story.append(Paragraph("<br/>", normal_style))  # Add some space between sections
+        story.append(Paragraph("<br/>", normal_style))  # Add space between sections
 
     # Build the PDF
     doc.build(story)
 
 st.title("PDF Processing Chatbot")
-st.markdown("Upload PDFs and generate a structured PDF format.")
+st.markdown("Upload PDFs and automatically generate a structured PDF format.")
 
 if 'pdf_data' not in st.session_state:
     st.session_state.pdf_data = {}
@@ -148,23 +153,5 @@ with st.sidebar:
                 with open(filepath, "wb") as f:
                     f.write(uploaded_file.getbuffer())
             asyncio.run(data_ingestion())
-
-# Add query input to dynamically generate content
-query = st.text_input("Enter your query to extract information")
-if query:
-    with st.spinner("Processing your query..."):
-        result = asyncio.run(handle_query(query))
-        if result:
-            # Parse the AI response into sections (Business Profile, Operating Segments, etc.)
-            sections = {}
-            for section in ["Business Profile", "Operating Segments", "Verizon Consumer Group", "Verizon Business Group", "Corporate and Other"]:
-                start_index = result.find(section)
-                if start_index != -1:
-                    end_index = result.find("\n", start_index + len(section))
-                    content = result[start_index + len(section):end_index].strip() if end_index != -1 else result[start_index + len(section):]
-                    sections[section] = content.strip()
-            
-            # Generate the PDF with AI-generated content
-            generate_pdf(sections, "generated_output.pdf")
-            display_pdf("generated_output.pdf")
-            st.success("Generated PDF is ready!")
+            # Automatically generate the PDF after ingestion
+            asyncio.run(generate_structured_pdf())
